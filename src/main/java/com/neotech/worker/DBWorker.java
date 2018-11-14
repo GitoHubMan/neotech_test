@@ -42,10 +42,12 @@ public class DBWorker extends Thread {
     }
 
     private void insertTimestamps(){
+        //start separate thread to collect timestamps
         Queue<Timestamp> timestamps = new ConcurrentLinkedQueue<>();
         CollectTimestampWorker tsWorker = new CollectTimestampWorker(timestamps);
         tsWorker.start();
 
+        //wait until there will be atleast one timestamp in queue
         while (timestamps.isEmpty()) {
             try {
                 Thread.sleep(100L);
@@ -54,6 +56,7 @@ public class DBWorker extends Thread {
             }
         }
 
+        //start to insert timestamps that separate thread collects
         while (true) {
             try (Connection con = DriverManager.getConnection(url, user, password)){
                 try (Statement st = con.createStatement()) {
