@@ -1,34 +1,31 @@
 package com.neotech.worker;
 
+import com.neotech.domain.TimeLog;
 import com.neotech.util.DBHelper;
+import com.neotech.util.PersistenceManager;
+import org.apache.log4j.Logger;
 
+import javax.persistence.EntityManager;
+import javax.persistence.EntityTransaction;
+import javax.persistence.Query;
 import java.sql.*;
-import java.util.Properties;
+import java.util.LinkedList;
+import java.util.List;
 import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedQueue;
 
 
 public class DBWorker extends Thread {
     private final String param;
-    private final String url;
-    private final String user;
-    private final String password;
+    private EntityManager em;
+    private static final Logger logger = Logger.getLogger(DBWorker.class);
     private final long dbErrorPauseSec = 5000L;
-    private String insertSql = "INSERT INTO %s(timestamp) VALUES(?)";
-    private String selectSql = "SELECT timestamp FROM %s order by id asc";
+
 
     
-    public DBWorker(String param) {
-        param = param != null? param.equals(DBHelper.INSERT_PARAM_NAME)? param : null : null;
-        this.param = param;
-        DBHelper dbHelper = new DBHelper();
-
-        Properties props = dbHelper.getProperties();
-        url = props.getProperty(DBHelper.URL_PROP_NAME);
-        user = props.getProperty(DBHelper.USER_PROP_NAME);
-        password = props.getProperty(DBHelper.PASSWORD_PROP_NAME);
-        insertSql = String.format(insertSql, props.getProperty(DBHelper.TABLE_PROP_NAME));
-        selectSql = String.format(selectSql, props.getProperty(DBHelper.TABLE_PROP_NAME));
+    public DBWorker(String[] params) {
+        param = params != null && params.length > 0? params[0].equals(DBHelper.INSERT_PARAM_NAME)? params[0] : null : null;
+        em = PersistenceManager.INSTANCE.getEntityManager();
     }
 
 
@@ -43,12 +40,12 @@ public class DBWorker extends Thread {
 
     private void insertTimestamps(){
         //start separate thread to collect timestamps
-        Queue<Timestamp> timestamps = new ConcurrentLinkedQueue<>();
-        CollectTimestampWorker tsWorker = new CollectTimestampWorker(timestamps);
+        Queue<TimeLog> timeLogs = new ConcurrentLinkedQueue<>();
+        CollectTimestampWorker tsWorker = new CollectTimestampWorker(timeLogs);
         tsWorker.start();
 
         //wait until there will be atleast one timestamp in queue
-        while (timestamps.isEmpty()) {
+        while (timeLogs.isEmpty()) {
             try {
                 Thread.sleep(100L);
             } catch (InterruptedException e) {
@@ -58,33 +55,32 @@ public class DBWorker extends Thread {
 
         //start to insert timestamps that separate thread collects
         while (true) {
-            try (Connection con = DriverManager.getConnection(url, user, password)){
-                try (Statement st = con.createStatement()) {
-                    con.setAutoCommit(false);
-
-                    for (Timestamp ts; (ts = timestamps.poll()) != null;){
-                        st.addBatch(insertSql.replace("?", "'" + ts.toString() + "'"));
+            EntityTransaction transaction = em.getTransaction();
+            try{
+                LinkedList<TimeLog> tmp = new LinkedList<>(timeLogs);
+                if(tmp.size() > 0) {
+                    transaction.begin();
+                    
+                    for (TimeLog tl : tmp) {
+                        em.persist(tl);
                     }
-
-                    st.executeBatch();
-                    con.commit();
-                    System.out.println("Records inserted successfully");
-
-                } catch (SQLException ex) {
-                    System.err.println(ex.getMessage());
-                    try {
-                        con.rollback();
-                    } catch (SQLException ex2) {
-                        System.err.println(ex2.getMessage());
-                    }
-                    Thread.sleep(dbErrorPauseSec);
+                    transaction.commit();
+                    em.clear();
+                    
+                    logger.info("Successfully inserted rows: " + tmp.size());
+                    for(int i=0; i<tmp.size(); i++)
+                        timeLogs.remove();
                 }
-            } catch (Exception ex) {
-                System.err.println(ex.getMessage());
+            } catch (Exception e){
+                logger.error("Insert time log failed. Error: ", e);
+                if (transaction.isActive()) {
+                    transaction.rollback();
+                    em.clear();
+                }
                 try {
-                    Thread.sleep(dbErrorPauseSec);
-                } catch (InterruptedException e) {
-                    System.err.println(ex.getMessage());
+                    em = PersistenceManager.INSTANCE.getEntityManager();
+                } catch (Exception ex){
+                    logger.error("Can't init new EntityManager. Error: ", e);
                 }
             }
         }
@@ -92,44 +88,17 @@ public class DBWorker extends Thread {
 
     private void printAllTimestamps(){
         while (true) {
-            try (Connection con = DriverManager.getConnection(url, user, password);
-                 Statement st = con.createStatement();
-                 ResultSet rs = st.executeQuery(selectSql)) {
-
-                while (rs.next()) {
-                    System.out.println(rs.getString(1));
+            try{
+                Query q = em.createQuery("select t from TimeLog t");
+                List<TimeLog> timeLogs = q.getResultList();
+                for (TimeLog timeLog : timeLogs) {
+                    logger.info(timeLog.getTimestamp());
                 }
+                em.close();
+                PersistenceManager.INSTANCE.close();
                 break;
-            } catch (SQLException ex) {
-                System.err.println(ex.getMessage());
-                try {
-                    Thread.sleep(dbErrorPauseSec);
-                } catch (InterruptedException e) {
-                    System.err.println(ex.getMessage());
-                }
-            }
-        }
-    }
-
-    private class CollectTimestampWorker extends Thread{
-        private Queue<Timestamp> timestamps;
-        private final long collectTsPauseSec = 1000L;
-        
-
-        public CollectTimestampWorker(Queue<Timestamp> timestamps) {
-            this.timestamps = timestamps;
-        }
-
-        @Override
-        public void run() {
-            while (true){
-                try {
-                    Timestamp timestamp = new Timestamp(System.currentTimeMillis());
-                    timestamps.add(timestamp);
-                    Thread.sleep(collectTsPauseSec);
-                } catch (InterruptedException e) {
-                    System.err.println(e.getMessage());
-                }
+            } catch (Exception e){
+                logger.error("Print time log failed. Error: ", e);
             }
         }
     }

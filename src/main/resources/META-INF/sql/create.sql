@@ -1,0 +1,2 @@
+--CREATE DATABASE IF NOT EXISTS testdb;
+CREATE TABLE IF NOT EXISTS time_log(Id BIGINT PRIMARY KEY AUTO_INCREMENT, timestamp timestamp not null);
